@@ -87,6 +87,8 @@ class VerdictResponse(BaseModel):
     head_sha: str = Field(..., alias="headSha")
     verdict: VerdictOutcome
     confidence: float = Field(..., ge=0.0, le=1.0)
+    security_score: int = Field(..., ge=0, le=100, alias="securityScore")
+    architecture_score: int = Field(..., ge=0, le=100, alias="architectureScore")
     summary: str
     root_cause: str = Field(..., alias="rootCause")
     impact: str

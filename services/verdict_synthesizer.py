@@ -50,6 +50,8 @@ def synthesize_verdict_narrative(
         architecture_findings=architecture_findings,
         overall_score=overall_score,
         verdict=verdict,
+        security_score=security_score,
+        architecture_score=architecture_score,
     )
 
 
@@ -92,18 +94,19 @@ def _synthesize_with_groq(
 
     system = (
         "You are MergeGuard AI summarizing a merge-readiness security and architecture scan.\n"
-        "Given the findings JSON, write a concise executive verdict narrative.\n"
+        "Given the findings JSON, write a clear executive verdict narrative.\n"
         "Respond with ONLY valid JSON:\n"
-        '{"summary":"one sentence headline of the main risk or clearance",'
+        '{"summary":"multi-sentence executive summary",'
         '"rootCause":"specific technical cause citing files/CVEs/rules",'
         '"impact":"business/user impact if merged",'
         '"confidence":0.92}\n'
         "Rules:\n"
-        "- summary: max 140 chars, specific, no fluff\n"
-        "- rootCause: reference the highest-severity real finding\n"
-        "- impact: explain merge risk in plain language\n"
+        "- summary: 3-5 sentences, 250-500 chars. Cover verdict, top risks, scan scope, and score context.\n"
+        "- Mention specific finding titles/CVEs where relevant; avoid one-line headlines.\n"
+        "- rootCause: reference the highest-severity real finding with technical detail\n"
+        "- impact: explain merge risk in plain language (2-3 sentences)\n"
         "- confidence: float 0.0-1.0 based on evidence quality and score\n"
-        "- If verdict is pass with no findings, say merge looks safe with low risk"
+        "- If verdict is pass with no findings, explain why merge looks safe and what was checked"
     )
     user = json.dumps(findings_payload, indent=2)
 
@@ -119,28 +122,93 @@ def _synthesize_with_groq(
     return narrative
 
 
+def _build_long_summary(
+    *,
+    verdict: Verdict,
+    security_findings: list[SecurityFinding],
+    architecture_findings: list[ArchitectureFinding],
+    security_score: int,
+    architecture_score: int,
+    overall_score: int,
+) -> str:
+    passed = verdict == Verdict.APPROVE
+    verdict_label = "approved for merge" if passed else "blocked from merge"
+    parts = [
+        f"MergeGuard analysis {verdict_label} this pull request with an overall score of {overall_score}/100 "
+        f"(security {security_score}/100, architecture {architecture_score}/100)."
+    ]
+
+    if security_findings:
+        top = security_findings[:3]
+        finding_lines = "; ".join(
+            f"{f.title} ({f.severity.value})" for f in top
+        )
+        parts.append(
+            f"Security scanning flagged {len(security_findings)} issue(s); "
+            f"the most relevant are: {finding_lines}."
+        )
+    else:
+        parts.append(
+            "No security findings exceeded blocking thresholds in dependency, secret, or SAST scans."
+        )
+
+    if architecture_findings:
+        top = architecture_findings[:2]
+        arch_lines = "; ".join(f"{f.title} ({f.severity.value})" for f in top)
+        parts.append(
+            f"Architecture heuristics reported {len(architecture_findings)} note(s), including {arch_lines}."
+        )
+    else:
+        parts.append("Architecture checks did not surface structural regressions in the scanned paths.")
+
+    if passed:
+        parts.append(
+            "Residual findings were reviewed against MergeGuard thresholds and did not meet criteria for a hard block."
+        )
+    else:
+        parts.append(
+            "One or more findings exceed MergeGuard blocking thresholds and should be remediated before merge."
+        )
+
+    return " ".join(parts)
+
+
 def _fallback_narrative(
     *,
     security_findings: list[SecurityFinding],
     architecture_findings: list[ArchitectureFinding],
     overall_score: int,
     verdict: Verdict,
+    security_score: int = 0,
+    architecture_score: int = 0,
 ) -> VerdictNarrative:
     top_security = security_findings[0] if security_findings else None
     top_arch = architecture_findings[0] if architecture_findings else None
 
+    summary = _build_long_summary(
+        verdict=verdict,
+        security_findings=security_findings,
+        architecture_findings=architecture_findings,
+        security_score=security_score,
+        architecture_score=architecture_score,
+        overall_score=overall_score,
+    )
+
     if verdict == Verdict.APPROVE and not security_findings and not architecture_findings:
         return VerdictNarrative(
-            summary="Automated scans found no blocking security or architecture issues.",
+            summary=summary,
             rootCause="No critical or high-severity findings in bandit, dependency, or architecture checks.",
-            impact="Low merge risk; no evidence of exploitable defects in the scanned paths.",
+            impact=(
+                "Low merge risk based on scanned paths. No exploitable defects or structural regressions "
+                "were identified at blocking severity. Standard post-merge monitoring is still recommended."
+            ),
             confidence=min(0.95, max(0.6, overall_score / 100)),
         )
 
     primary = top_security or top_arch
     if primary is None:
         return VerdictNarrative(
-            summary=f"Merge analysis scored {overall_score}/100.",
+            summary=summary,
             rootCause="Insufficient actionable findings to identify a single root cause.",
             impact="Review recommended before merge.",
             confidence=max(0.5, overall_score / 100),
@@ -148,15 +216,16 @@ def _fallback_narrative(
 
     passed = verdict == Verdict.APPROVE
     return VerdictNarrative(
-        summary=(
-            f"{'Merge approved' if passed else 'Merge blocked'}: "
-            f"{primary.title} ({getattr(primary.severity, 'value', primary.severity)})."
-        ),
+        summary=summary,
         rootCause=primary.description[:400],
         impact=(
-            "Security or architecture regressions may reach production if merged."
+            "Security or architecture regressions may reach production if merged, including exposure from "
+            "vulnerable dependencies or unresolved structural issues."
             if not passed
-            else "Residual findings are present but below blocking thresholds."
+            else (
+                "Residual findings are present but below blocking thresholds. Monitor dependency updates "
+                "and re-scan after merge to catch drift."
+            )
         ),
         confidence=min(0.99, max(0.55, overall_score / 100)),
     )

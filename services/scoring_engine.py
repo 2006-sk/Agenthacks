@@ -105,6 +105,8 @@ def build_verdict_response(
         head_sha=request.head_sha,
         verdict=outcome,
         confidence=round(narrative.confidence, 2),
+        security_score=security_score,
+        architecture_score=architecture_score,
         summary=narrative.summary,
         root_cause=narrative.root_cause,
         impact=narrative.impact,
