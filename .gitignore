@@ -4,3 +4,4 @@ __pycache__/
 .opsera/
 .env
 .local/
+src/**/__pycache__/
